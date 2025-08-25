@@ -1,0 +1,88 @@
+name: Build Blog from Issues
+
+on:
+  # Run when a new issue is created, edited, or labeled 'post'
+  issues:
+    types: [opened, edited, labeled]
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Only run if the issue has the 'post' label
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.issue.labels.*.name, 'post')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # To push to gh-pages branch
+      issues: read   # To read the issues
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Site from Issues
+        run: |
+          # Create public directory
+          mkdir -p public
+
+          # Get templates
+          BASE_TEMPLATE=$(cat templates/base.html)
+          POST_TEMPLATE=$(cat templates/post.html)
+
+          # Fetch issues with the 'post' label using GitHub CLI
+          POSTS_JSON=$(gh issue list --label "post" --json title,number,createdAt,body --limit 100)
+          
+          # Generate individual post pages
+          echo "$POSTS_JSON" | jq -c '.[]' | while read -r issue; do
+            TITLE=$(echo "$issue" | jq -r .title)
+            BODY_MD=$(echo "$issue" | jq -r .body)
+            # Convert Markdown body to HTML using GitHub API for perfect rendering
+            BODY_HTML=$(gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              /markdown \
+              -f text="$BODY_MD" | jq -r .)
+            
+            POST_NUMBER=$(echo "$issue" | jq -r .number)
+            CREATED_AT=$(echo "$issue" | jq -r .createdAt | cut -d'T' -f1)
+
+            # Create the content for the post page
+            POST_CONTENT="${POST_TEMPLATE//'{{TITLE}}'/"$TITLE"}"
+            POST_CONTENT="${POST_CONTENT//'{{DATE}}'/"$CREATED_AT"}"
+            POST_CONTENT="${POST_CONTENT//'{{BODY}}'/"$BODY_HTML"}"
+            
+            # Create the full HTML page
+            PAGE="${BASE_TEMPLATE//'{{TITLE}}'/"$TITLE"}"
+            PAGE="${PAGE//'{{CONTENT}}'/"$POST_CONTENT"}"
+
+            echo "$PAGE" > public/$POST_NUMBER.html
+          done
+
+          # Generate index.html
+          POST_LIST_HTML=""
+          echo "$POSTS_JSON" | jq -c '.[] | {title: .title, number: .number, createdAt: .createdAt}' | while read -r issue; do
+              TITLE=$(echo "$issue" | jq -r .title)
+              POST_NUMBER=$(echo "$issue" | jq -r .number)
+              CREATED_AT=$(echo "$issue" | jq -r .createdAt | cut -d'T' -f1)
+              POST_LIST_HTML+="<li><a href=\"/$POST_NUMBER.html\"><h2>$TITLE</h2><span>$CREATED_AT</span></a></li>"
+          done
+          
+          INDEX_CONTENT="<h1>Posts</h1><ul class='post-list'>$POST_LIST_HTML</ul>"
+          INDEX_PAGE="${BASE_TEMPLATE//'{{TITLE}}'/'Home'}"
+          INDEX_PAGE="${INDEX_PAGE//'{{CONTENT}}'/"$INDEX_CONTENT"}"
+          
+          echo "$INDEX_PAGE" > public/index.html
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
